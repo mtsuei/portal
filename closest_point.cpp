@@ -2,80 +2,87 @@
 // Copyright(c) 2019-24 Intel Corporation. All Rights Reserved.
 
 #include <librealsense2/rs.hpp> // RealSense Cross Platform API
-#include <iostream>
-#include <opencv2/opencv.hpp>
-
-#include <chrono>
 #include <common/cli.h>
+
+
+#include <iostream>
+#include <vector>
+
+// OpenCV includes
+#include <opencv2/opencv.hpp>
+#include <opencv2/highgui.hpp>
+
+void plotHistogram(const cv::Mat& depth_image) {
+    // Define histogram parameters
+    int histSize = 512; // Number of bins
+    float range[] = { 0, 65535 }; // Depth values range (16-bit max)
+    const float* histRange = { range };
+
+    cv::Mat hist;
+    cv::calcHist(&depth_image, 1, 0, cv::Mat(), hist, 1, &histSize, &histRange);
+
+    // Normalize histogram for visualization
+    int hist_w = 1024, hist_h = 400;
+    int bin_w = cvRound((double)hist_w / histSize);
+    cv::Mat histImage(hist_h, hist_w, CV_8UC3, cv::Scalar(0, 0, 0));
+
+    // Normalize histogram
+    cv::normalize(hist, hist, 0, histImage.rows, cv::NORM_MINMAX);
+
+    // Draw histogram
+    for (int i = 1; i < histSize; i++) {
+        cv::line(histImage,
+            cv::Point(bin_w * (i - 1), hist_h - cvRound(hist.at<float>(i - 1))),
+            cv::Point(bin_w * i, hist_h - cvRound(hist.at<float>(i))),
+            cv::Scalar(255, 255, 255), 2);
+    }
+
+    cv::imshow("Depth Histogram", histImage);
+}
 
 // Hello RealSense example demonstrates the basics of connecting to a RealSense device
 // and taking advantage of depth data
-int main(int argc, char * argv[]) try
+int main(int argc, char* argv[]) try
 {
-    auto settings = rs2::cli( "hello-realsense example" )
-        .process( argc, argv );
+    auto settings = rs2::cli("hello-realsense example")
+        .process(argc, argv);
 
     // Create a Pipeline - this serves as a top-level API for streaming and processing frames
-    rs2::pipeline p( settings.dump() );
+    rs2::pipeline p(settings.dump());
 
     // Configure and start the pipeline
     p.start();
 
-    double N_repetitions = 20;
     while (true)
     {
-        // Initialize clock
-        //auto start = std::chrono::high_resolution_clock::now();
+        rs2::frameset frames = p.wait_for_frames();
+        rs2::depth_frame depth = frames.get_depth_frame();
 
-        //// Calculating cycle time
-        //for (int i = 0; i < N_repetitions; i++) {
+        const int w = depth.get_width();
+        const int h = depth.get_height();
 
-            // Block program until frames arrive
-            rs2::frameset frames = p.wait_for_frames();
+        // Convert RealSense depth frame to OpenCV Mat (16-bit grayscale)
+        cv::Mat depth_image(cv::Size(w, h), CV_16UC1, (void*)depth.get_data(), cv::Mat::AUTO_STEP);
 
-            // Try to get a frame of a depth image
-            rs2::depth_frame depth = frames.get_depth_frame();
+        // Normalize for display
+        cv::Mat depth_colormap;
+        double min, max;
+        cv::minMaxIdx(depth_image, &min, &max);
+        depth_image.convertTo(depth_colormap, CV_8UC1, 255.0 / max);
+        cv::applyColorMap(depth_colormap, depth_colormap, cv::COLORMAP_JET);
 
-            // Query the distance from the camera to the object in the center of the image
-            // float dist_to_center = depth.get_distance(width / 2, height / 2);
+        // Show depth frame
+        cv::imshow("Depth Frame", depth_colormap);
 
-            // Get height and width
-            auto width = depth.get_width();
-            auto height = depth.get_height();
-            
-            // Convert depth frame to OpenCV format
-            //cv::Mat depth_mat(cv::Size(width, height), CV_16UC1, (void*)depth.get_data(), cv::Mat::AUTO_STEP);
+        // Plot histogram
+        plotHistogram(depth_image);
 
-            // Find closest point
-            float closest_dist = depth.get_distance(0, 0);
-            for (int i = 0; i < width; i++) {
-                for (int j = 0; j < height; j++) {
-                    float dist = depth.get_distance(i, j);
-                    // std::cout << "(" << i << "," << j << ")" << "\n";
-                    if (dist < closest_dist) {
-                        closest_dist = dist;
-                    }
-                }
-            }
-
-        // Print the distance
-        std::cout << "The camera is facing an object " << closest_dist* 39.3701 << " inches away \r";
-        //}
-
-        // End timer
-        //auto end = std::chrono::high_resolution_clock::now();
-
-        // Calculate duration
-        // std::chrono::duration<double> duration = end - start;
-        // double freq = N_repetitions / duration.count();
-
-        // Print the frequency
-        //std::cout << "The camera is operating at a frequency of" << freq << " Hz\r";
+        if (cv::waitKey(1) == 27) break; // Press 'ESC' to exit
     }
 
     return EXIT_SUCCESS;
 }
-catch (const rs2::error & e)
+catch (const rs2::error& e)
 {
     std::cerr << "RealSense error calling " << e.get_failed_function() << "(" << e.get_failed_args() << "):\n    " << e.what() << std::endl;
     return EXIT_FAILURE;
