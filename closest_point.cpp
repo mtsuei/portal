@@ -118,9 +118,10 @@ int main() try {
         // std::cout << "Runner Distance: " << runner_distance_m << " meters | Velocity: " << velocity_m_s << " m/s" << std::endl;
 
         // "Open" the door if the right distance
-        if (runner_distance_m < doorOpenThreshold) {
+        /*if (runner_distance_m < doorOpenThreshold) {
             doorOpen = true;
-        }
+        }*/
+        doorOpen = runner_distance_m < doorOpenThreshold;
 
         // Output door distance and 
         std::cout << "Runner Distance: " << runner_distance_m;
@@ -130,7 +131,8 @@ int main() try {
         else {
             std::cout << "Door not open." << std::endl;
         }
-
+        // Send information to Arduino
+        // ADD IN SEND FUNCTION HERE
 
 
         // Debugging: Draw ROI on depth map
@@ -149,6 +151,7 @@ int main() try {
         // Show both plots
         cv::imshow("Runner Distance Plot", distance_plot);
         cv::imshow("Runner Velocity Plot", velocity_plot);
+
 
         if (cv::waitKey(1) == 27) break; // Press 'ESC' to exit
     }
