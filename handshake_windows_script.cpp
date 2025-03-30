@@ -8,14 +8,20 @@
 #include <chrono> // For time tracking
 
 // Define depth thresholds (in mm)
-const int MIN_DEPTH = 300;  // Ignore anything closer than 0.5m
+const int MIN_DEPTH = 50;  // Ignore anything closer than 0.5m
 const int MAX_DEPTH = 3000; // Ignore anything farther than 4m
 
 // Define region of interest (ROI) to ignore floor
-const int ROI_TOP = 100;     // Ignore pixels above this line
-const int ROI_BOTTOM = 350;  // Ignore the floor
-const int ROI_LEFT = 100;    // Focus on the central region
-const int ROI_RIGHT = 540;   // Ignore far-left and far-right objects
+//const int ROI_TOP = 100;     // Ignore pixels above this line
+//const int ROI_BOTTOM = 350;  // Ignore the floor
+//const int ROI_LEFT = 100;    // Focus on the central region
+//const int ROI_RIGHT = 540;   // Ignore far-left and far-right objects
+
+// Adding in temp ROI definition for bench test
+const int ROI_TOP = 150;     // Ignore pixels above this line
+const int ROI_BOTTOM = 250;  // Ignore the floor
+const int ROI_LEFT = 250;    // Focus on the central region
+const int ROI_RIGHT = 350;   // Ignore far-left and far-right objects
 
 // Define plot settings
 const int PLOT_WIDTH = 600;
@@ -185,14 +191,38 @@ public:
 };
 // END CLAUDE CODE
 
+// BEGIN CHAT GPT GENERATED MOVING AVERAGE CLASS
+#include <queue>
+
+class MovingAverage {
+    int size;
+    std::queue<int> window;
+    double sum;
+
+public:
+    MovingAverage(int windowSize) : size(windowSize), sum(0) {}
+
+    double next(int val) {
+        if (window.size() == size) {
+            sum -= window.front();
+            window.pop();
+        }
+        window.push(val);
+        sum += val;
+        return sum / window.size();
+    }
+};
+// END MOVING AVERAGE CLASS
+
+
 int main() try {
 
     // Replace with your actual serial port
-    #ifdef _WIN32
-        SerialPort serialPort("COM5");  // Windows style port
-    #else
-        SerialPort serialPort("/dev/ttyACM0");  // Linux/Mac style port
-    #endif
+#ifdef _WIN32
+    SerialPort serialPort("COM5");  // Windows style port
+#else
+    SerialPort serialPort("/dev/ttyACM0");  // Linux/Mac style port
+#endif
     std::cout << "Sending binary values over serial. Press Ctrl+C to exit." << std::endl;
 
     rs2::pipeline pipe;
@@ -204,8 +234,10 @@ int main() try {
     float doorOpenThreshold = 0.7; // Distance in m(?) that door opens
 
     last_time = std::chrono::steady_clock::now(); // Initialize time tracking
+    MovingAverage velocity_ma(20);
 
     while (true) {
+        /* ------------------------- CAMERA & IMAGE PROCCESSING ------------------------- */
         rs2::frameset frames = pipe.wait_for_frames();
         rs2::depth_frame depth = frames.get_depth_frame();
 
@@ -244,6 +276,9 @@ int main() try {
             velocity_m_s = (runner_distance_m - last_distance) / elapsed_time.count();
         }
 
+        // Update velocity moving average
+        velocity_ma.next(velocity_m_s);
+
         // Store values for plotting
         distance_history.push_back(runner_distance_m);
         velocity_history.push_back(velocity_m_s);
@@ -252,16 +287,20 @@ int main() try {
 
         // Display distance and velocity
         // std::cout << "Runner Distance: " << runner_distance_m << " meters | Velocity: " << velocity_m_s << " m/s" << std::endl;
-        
+
+        /* ------------------------- CONTROL & COMMUNICATION ------------------------- */
+
         // "Open" the door if the right distance
         /*if (runner_distance_m < doorOpenThreshold) {
             doorOpen = true;
         }*/
         bool lastDoorOpen = doorOpen;
         doorOpen = runner_distance_m < doorOpenThreshold;
-        // Convert to character '0' or '1'
+
+        // Send information to Arduino
         if (lastDoorOpen != doorOpen) {
             // Value has changed, send update signal
+            // Convert to character '0' or '1'
             char sendValue = doorOpen ? '1' : '0';
 
             // Send value
@@ -271,7 +310,6 @@ int main() try {
             std::cout << "Sent: " << (doorOpen ? "1" : "0") << std::endl;
         }
 
-
         // Output door distance and 
         std::cout << "Runner Distance: " << runner_distance_m;
         if (doorOpen) {
@@ -280,9 +318,8 @@ int main() try {
         else {
             std::cout << "Door not open." << std::endl;
         }
-        // Send information to Arduino
 
-        
+
         // Debugging: Draw ROI on depth map
         cv::Mat depth_colormap;
         depth_float.convertTo(depth_colormap, CV_8UC1, 255.0 / MAX_DEPTH);
@@ -299,7 +336,7 @@ int main() try {
         // Show both plots
         cv::imshow("Runner Distance Plot", distance_plot);
         cv::imshow("Runner Velocity Plot", velocity_plot);
-        
+
 
         if (cv::waitKey(1) == 27) break; // Press 'ESC' to exit
     }
