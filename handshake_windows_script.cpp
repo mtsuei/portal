@@ -12,16 +12,16 @@ const int MIN_DEPTH = 50;  // Ignore anything closer than 0.5m
 const int MAX_DEPTH = 3000; // Ignore anything farther than 4m
 
 // Define region of interest (ROI) to ignore floor
-//const int ROI_TOP = 100;     // Ignore pixels above this line
-//const int ROI_BOTTOM = 350;  // Ignore the floor
-//const int ROI_LEFT = 100;    // Focus on the central region
-//const int ROI_RIGHT = 540;   // Ignore far-left and far-right objects
+const int ROI_TOP = 100;     // Ignore pixels above this line
+const int ROI_BOTTOM = 350;  // Ignore the floor
+const int ROI_LEFT = 100;    // Focus on the central region
+const int ROI_RIGHT = 540;   // Ignore far-left and far-right objects
 
 // Adding in temp ROI definition for bench test
-const int ROI_TOP = 150;     // Ignore pixels above this line
-const int ROI_BOTTOM = 250;  // Ignore the floor
-const int ROI_LEFT = 250;    // Focus on the central region
-const int ROI_RIGHT = 350;   // Ignore far-left and far-right objects
+//const int ROI_TOP = 150;     // Ignore pixels above this line
+//const int ROI_BOTTOM = 250;  // Ignore the floor
+//const int ROI_LEFT = 250;    // Focus on the central region
+//const int ROI_RIGHT = 350;   // Ignore far-left and far-right objects
 
 // Define plot settings
 const int PLOT_WIDTH = 600;
@@ -211,6 +211,10 @@ public:
         sum += val;
         return sum / window.size();
     }
+
+    double getAverage() const {
+        return window.empty() ? 0 : sum / window.size();
+    }
 };
 // END MOVING AVERAGE CLASS
 
@@ -231,7 +235,8 @@ int main() try {
     pipe.start(cfg);
 
     bool doorOpen = false;
-    float doorOpenThreshold = 0.7; // Distance in m(?) that door opens
+    float doorOpenTime = 0.2 // time in ms to open door
+        float doorOpenThreshold = 0.7; // Distance in m(?) that door opens
 
     last_time = std::chrono::steady_clock::now(); // Initialize time tracking
     MovingAverage velocity_ma(20);
@@ -294,8 +299,12 @@ int main() try {
         /*if (runner_distance_m < doorOpenThreshold) {
             doorOpen = true;
         }*/
-        bool lastDoorOpen = doorOpen;
-        doorOpen = runner_distance_m < doorOpenThreshold;
+        bool lastDoorOpen = doorOpen; // Only send a signal when it changes
+
+        // Determine whether door should open
+        // OLD LOGIC
+        // doorOpen = runner_distance_m < doorOpenThreshold;
+        doorOpen = velocity_ma.getAverage() * door_open_time > runner_distance_m;
 
         // Send information to Arduino
         if (lastDoorOpen != doorOpen) {
