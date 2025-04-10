@@ -14,9 +14,14 @@
  */
 
 // Arduino code to read a binary value from serial and set pin D2 accordingly
-const int outputPin = 2;        // Using digital pin D2
-const int latchPin = 5;         // Using digital pin D5 as latch LED indicator
+const int outputPin = 5;        // Using digital pin D5; temp light output
 const int resetPin = 6;         // Using digital pin D6 to reset the latch
+
+// Tower Solenoid Pins
+const int leftTowerOpen = 13;
+const int leftTowerClose = 12;
+const int rightTowerOpen = 11;
+const int rightTowerClose = 10;
 
 const int piCommsPin_close = 7; // Using digital pin D7 to listen for pi telling to close
 const int piCommsPin_start = 8; // Using digital pin D8 to listen for pi tellingn to start
@@ -35,18 +40,25 @@ void setup() {
   
   // Initialize pinModes
   pinMode(outputPin, OUTPUT);
-  pinMode(latchPin, OUTPUT);
+  pinMode(leftTowerOpen, OUTPUT);
+  pinMode(leftTowerClose, OUTPUT);
+  pinMode(rightTowerOpen, OUTPUT);
+  pinMode(rightTowerClose, OUTPUT);
+  
   pinMode(resetPin, INPUT_PULLUP);
   pinMode(piCommsPin_close, INPUT_PULLUP);
   pinMode(piCommsPin_start, INPUT_PULLUP);
   
   // Initialize pins
   digitalWrite(outputPin, LOW);
-  digitalWrite(latchPin, LOW);
-
+  digitalWrite(leftTowerOpen, LOW);
+  digitalWrite(leftTowerClose, LOW);
+  digitalWrite(rightTowerOpen, LOW);
+  digitalWrite(rightTowerClose, LOW);
+  
   // Initialize mode
   // Arduino assumes door is open on first connection
-  mode = 
+  systemState = 2;
   
   // Wait for serial port to connect
   while (!Serial) {
@@ -56,16 +68,27 @@ void setup() {
 
 
 char lastByte;              // Holds most recent serial state
-bool latched = false;       // Has the door already been opened?
 
 void openDoor(){
   // Replace this with outputs to the solenoids
-  delay(100);  
+  digitalWrite(leftTowerOpen, HIGH);
+  digitalWrite(rightTowerOpen, HIGH);
+  digitalWrite(outputPin, HIGH); 
+
+  delay(1000);
+  digitalWrite(leftTowerOpen, LOW);
+  digitalWrite(rightTowerOpen, LOW);
 }
 
 void closeDoor(){
   // Replace this with outputs to the solenoids
-  delay(100);    
+  digitalWrite(leftTowerClose, HIGH);
+  digitalWrite(rightTowerClose, HIGH);
+  digitalWrite(outputPin, LOW); 
+
+  delay(1000);
+  digitalWrite(leftTowerClose, LOW);
+  digitalWrite(rightTowerClose, LOW);  
 }
 
 void loop() {  
@@ -77,25 +100,23 @@ void loop() {
     
     // Process the value
     if (incomingByte == '1') {
-      digitalWrite(outputPin, HIGH);
-      Serial.println("Pin D2 set to HIGH");
-      if(!latched){
-        latched = true; 
-        digitalWrite(latchPin, HIGH);
-      }
+      // Solenoid trigger signal received
+      // TODO: CHECK THAT WE'RE IN ARMED STATE
+      // TODO: CHANGE STATE
+      openDoor();
     } 
     else if (incomingByte == '0') {
-      digitalWrite(outputPin, LOW);
-      Serial.println("Pin D2 set to LOW");
+      // Do nothing for now
     }
     // Ignore any other characters
   }
 
-  // Check if we need to reset the latch
-  // I don't think a debounce is needed
-  Serial.println(digitalRead(resetPin));
-  if(digitalRead(resetPin) == 1){
-    latched = false;
+  // Close door
+  
+  if (digitalRead(resetPin) == LOW){
+    // TODO: CHECK THAT WE'RE IN OPEN STATE
+    // TODO: CHANGE STATE
+    closeDoor(); 
   }
   
   

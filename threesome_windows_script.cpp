@@ -5,6 +5,7 @@
 
     TODO: redo velocity estimation (moving average instead of position?)
     TODO: incorporate camera status in signal to arduino
+    TODO: make sure we're not querying camera RGB output
 */
 
 #include <librealsense2/rs.hpp> // RealSense API
@@ -14,6 +15,11 @@
 #include <chrono> // For time tracking
 #include <thread>
 #include <cstdlib>
+
+#include <librealsense2/rs.hpp>
+#include <pcl/point_types.h>
+#include <pcl/io/pcd_io.h>
+#include <pcl/point_cloud.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -165,15 +171,11 @@ public:
 };
 // END MOVING AVERAGE CLASS
 
-// Define depth thresholds (in mm)
-const int MIN_DEPTH = 50;  // Ignore anything closer than 0.5m
-const int MAX_DEPTH = 3000; // Ignore anything farther than 4m
-
 // Define region of interest (ROI) to ignore floor
-const int ROI_TOP = 100;     // Ignore pixels above this line
+const int ROI_TOP = 50;     // Ignore pixels above this line
 const int ROI_BOTTOM = 350;  // Ignore the floor
-const int ROI_LEFT = 100;    // Focus on the central region
-const int ROI_RIGHT = 540;   // Ignore far-left and far-right objects
+const int ROI_LEFT = 120;    // Focus on the central region
+const int ROI_RIGHT = 520;   // Ignore far-left and far-right objects
 
 // Smaller ROI definition for bench test
 //const int ROI_TOP = 150;     // Ignore pixels above this line
@@ -222,73 +224,91 @@ cv::Mat draw_plot(const std::vector<float>& data, const std::string& label, cv::
     return plot;
 }
 
-int main() try {
+const float cameraHeight = 2.413f;   // meters
+const float cameraDecAngle = 17.0f; // degrees
 
-    // Define port for ardnino communication
+const float resolution = 0.01f; // 1cm per pixel
+const int map_size = 500;       // 5m x 5m map
+
+const bool showCameraFeedROI = true;
+
+int main() try {
+    //  Declare the serial port
 #ifdef _WIN32
-    SerialPort serialPort("COM5");  // Windows style port
+    SerialPort serialPort("COM7");  // Windows style port
 #else
     SerialPort serialPort("/dev/ttyACM0");  // Linux/Mac style port
 #endif
     std::cout << "Sending binary values over serial. Press Ctrl+C to exit." << std::endl;
 
-    // Initialize realsense data pipelines
     rs2::pipeline pipe;
-    rs2::config cfg;
-    cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);
-    pipe.start(cfg);
+    pipe.start();
 
-    // Initialize door state variables
-    bool isDoorOpen = false;
+    float theta = cameraDecAngle * M_PI / 180.0f;
+    float cosT = cos(theta), sinT = sin(theta);
 
-    // Define control and door parameters
-    const float doorOpenTime = 0.2;                         // [ms] time to open door
-    const float cameraHeight = 2.27;                        // [m] height of camera
-    const float cameraDecAngle = 38;                        // [deg] declination angle of camera
-    const float doorOpenThreshold_distance = 0.2;           // [m] Distance rider should be before opening door
+    // Buffers
+    cv::Mat zmap(map_size, map_size, CV_32F, cv::Scalar(0));
+    cv::Mat count_z(map_size, map_size, CV_32F, cv::Scalar(0));
 
-    last_time = std::chrono::steady_clock::now(); // Initialize time tracking
-    MovingAverage velocity_ma(20);
+    cv::Mat xzmap(map_size, map_size, CV_32F, cv::Scalar(0));
+    cv::Mat count_xz(map_size, map_size, CV_32F, cv::Scalar(0));
 
-    // ----- Get intrinsics -----
-    rs2::frameset frames = pipe.wait_for_frames();
-    rs2::depth_frame depth = frames.get_depth_frame();
-    auto intr = depth.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
+    float closest_point[3]; // [x, y, z]
 
-    const float angle_rad = -cameraDecAngle * CV_PI / 180.0f;  // negative for downward tilt
-    const float sin_theta = sin(angle_rad);
-    const float cos_theta = cos(angle_rad);
-
-
-
-    while (true) {
-        /* ------------------------- CAMERA & IMAGE PROCCESSING ------------------------- */
+    while (cv::waitKey(1) != 27) {
         rs2::frameset frames = pipe.wait_for_frames();
         rs2::depth_frame depth = frames.get_depth_frame();
+        rs2_intrinsics intr = depth.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
 
-        // Convert RealSense depth frame to OpenCV Mat
-        cv::Mat depth_mat = depth_to_mat(depth);
+        zmap.setTo(0);
+        count_z.setTo(0);
+        xzmap.setTo(0);
+        count_xz.setTo(0);
 
-        // Convert depth to float for processing
-        cv::Mat depth_float;
-        depth_mat.convertTo(depth_float, CV_32F);
+        int w = depth.get_width(), h = depth.get_height();
+        // Reset min closest point
+        closest_point[1] = std::numeric_limits<float>::max();
 
-        // Mask out invalid depth values
-        cv::Mat valid_depth_mask = (depth_float > MIN_DEPTH) & (depth_float < MAX_DEPTH);
-        depth_float.setTo(MAX_DEPTH, ~valid_depth_mask);
+        for (int y = ROI_TOP; y < ROI_BOTTOM; y += 2) {
+            for (int x = ROI_LEFT; x < ROI_RIGHT; x += 2) {
+                float dist = depth.get_distance(x, y);
+                if (dist <= 0 || dist > 5.0f) continue;
 
-        // Extract ROI (Region of Interest)
-        cv::Rect roi(ROI_LEFT, ROI_TOP, ROI_RIGHT - ROI_LEFT, ROI_BOTTOM - ROI_TOP);
-        cv::Mat roi_depth = depth_float(roi);
-        cv::Mat roi_mask = valid_depth_mask(roi);
+                float pixel[2] = { static_cast<float>(x), static_cast<float>(y) };
+                float p_cam[3];
+                rs2_deproject_pixel_to_point(p_cam, &intr, pixel, dist);
 
-        // Find the minimum depth value in the ROI (runner’s position)
-        double min_val;
-        cv::minMaxIdx(roi_depth, &min_val, nullptr, nullptr, nullptr, roi_mask);
+                // Transform to world frame
+                float Xw = p_cam[0];
+                float Yw = -(p_cam[1] * cosT - p_cam[2] * sinT);
+                float Zw = -p_cam[1] * sinT - p_cam[2] * cosT + cameraHeight;
 
-        // Convert mm to meters
-        float runner_distance_m = min_val / 1000.0;
+                // Track closest point
+                if (Yw < closest_point[1] && Zw > 0.6) {
+                    closest_point[0] = Xw;
+                    closest_point[1] = Yw;
+                    closest_point[2] = Zw;
+                }
 
+                // Top-down view: X-Y -> color Z
+                int ix = static_cast<int>(map_size / 2 + Xw / resolution);
+                int iy = static_cast<int>(map_size / 2 + Yw / resolution);
+                if (ix >= 0 && ix < map_size && iy >= 0 && iy < map_size) {
+                    zmap.at<float>(iy, ix) += Zw;
+                    count_z.at<float>(iy, ix) += 1.0f;
+                }
+
+                // Side view: X-Z -> color Y
+                int iz = static_cast<int>(map_size - 1 - Zw / resolution); // Z up → image down
+                if (ix >= 0 && ix < map_size && iz >= 0 && iz < map_size) {
+                    xzmap.at<float>(iz, ix) += Yw;
+                    count_xz.at<float>(iz, ix) += 1.0f;
+                }
+            }
+        }
+
+        /* --------------------- PROCESS POSITION DATA --------------------- */
         // Get current time
         auto now = std::chrono::steady_clock::now();
         std::chrono::duration<float> elapsed_time = now - last_time;
@@ -298,126 +318,17 @@ int main() try {
         float velocity_m_s = 0.0;
         if (!distance_history.empty()) {
             float last_distance = distance_history.back();
-            velocity_m_s = (runner_distance_m - last_distance) / elapsed_time.count();
+            velocity_m_s = (closest_point[1] - last_distance) / elapsed_time.count();
         }
 
         // Update velocity moving average
-        velocity_ma.next(velocity_m_s);
+        /*velocity_ma.next(velocity_m_s);*/
 
         // Store values for plotting
-        distance_history.push_back(runner_distance_m);
+        distance_history.push_back(closest_point[1]);
         velocity_history.push_back(velocity_m_s);
         if (distance_history.size() > MAX_POINTS) distance_history.erase(distance_history.begin());
         if (velocity_history.size() > MAX_POINTS) velocity_history.erase(velocity_history.begin());
-
-        // Display distance and velocity
-        // std::cout << "Runner Distance: " << runner_distance_m << " meters | Velocity: " << velocity_m_s << " m/s" << std::endl;
-
-        cv::Mat height_map(480, 640, CV_32F);
-        cv::Mat wall_dist_map(480, 640, CV_32F);
-
-        for (int y = 0; y < intr.height; ++y) {
-            for (int x = 0; x < intr.width; ++x) {
-                float depth_val = depth.get_distance(x, y);
-                if (depth_val <= 0.1f || depth_val > 10.0f) {
-                    height_map.at<float>(y, x) = 0;
-                    wall_dist_map.at<float>(y, x) = 0;
-                    continue;
-                }
-
-                // Get 3D point in camera frame
-                float point[3];
-                float pixel[2] = { static_cast<float>(x), static_cast<float>(y) };
-                rs2_deproject_pixel_to_point(point, &intr, pixel, depth_val);
-
-                float Xc = point[0]; // right
-                float Yc = point[1]; // down
-                float Zc = point[2]; // forward
-
-                // Rotate point by camera declination (around x-axis)
-                float Yw = cos_theta * Yc - sin_theta * Zc;
-                float Zw = sin_theta * Yc + cos_theta * Zc;
-
-                // Real-world values
-                float height = cameraHeight - Yw;
-                float dist_from_wall = Zw;
-
-                height_map.at<float>(y, x) = height;
-                wall_dist_map.at<float>(y, x) = dist_from_wall;
-            }
-        }
-
-        // Normalize and convert to 8-bit
-        cv::Mat height_display, wall_display;
-        cv::normalize(height_map, height_display, 0, 255, cv::NORM_MINMAX);
-        cv::normalize(wall_dist_map, wall_display, 0, 255, cv::NORM_MINMAX);
-
-        height_display.convertTo(height_display, CV_8UC1);
-        wall_display.convertTo(wall_display, CV_8UC1);
-
-        // Apply colormaps
-        cv::applyColorMap(height_display, height_display, cv::COLORMAP_JET);
-        cv::applyColorMap(wall_display, wall_display, cv::COLORMAP_HOT);
-
-        // Overlay pink where height < 0.1
-        for (int y = 0; y < height_map.rows; ++y) {
-            for (int x = 0; x < height_map.cols; ++x) {
-                if (height_map.at<float>(y, x) < 0.1f) {
-                    height_display.at<cv::Vec3b>(y, x) = cv::Vec3b(255, 0, 255); // Pink (BGR)
-                }
-            }
-        }
-
-        cv::imshow("Height from Ground (m)", height_display);
-        cv::imshow("Distance from Wall (m)", wall_display);
-
-        /* ------------------------- CONTROL & COMMUNICATION ------------------------- */
-
-        // "Open" the door if the right distance
-        /*if (runner_distance_m < doorOpenThreshold) {
-            isDoorOpen = true;
-        }*/
-        bool lastIsDoorOpen = isDoorOpen; // Only send a signal when it changes
-
-        // Logic to determine whether door should open
-        // Position based logic
-        isDoorOpen = runner_distance_m < doorOpenThreshold_distance;
-        // Estimated velocity based logic
-        //isDoorOpen = velocity_ma.getAverage() * doorOpenTime > runner_distance_m;
-
-        // Send information to Arduino
-        if (lastIsDoorOpen != isDoorOpen) {
-            // Value has changed, send update signal
-            // Convert to character '0' or '1'
-            char sendValue = isDoorOpen ? '1' : '0';
-
-            // Send value
-            serialPort.write(&sendValue, 1);
-
-            // Print to console
-            std::cout << "Sent: " << (isDoorOpen ? "1" : "0") << std::endl;
-        }
-
-        // Output door distance and 
-        std::cout << "Runner Distance: " << runner_distance_m;
-        if (isDoorOpen) {
-            std::cout << "Door open." << std::endl;
-        }
-        else {
-            std::cout << "Door not open." << std::endl;
-        }
-
-
-        // Debugging: Draw ROI on depth map
-        cv::Mat depth_colormap;
-        cv::Mat roi_depth_colormap;
-        depth_float.convertTo(depth_colormap, CV_8UC1, 255.0 / MAX_DEPTH);
-        roi_depth.convertTo(roi_depth_colormap, CV_8UC1, 255.0 / MAX_DEPTH);
-        cv::applyColorMap(depth_colormap, depth_colormap, cv::COLORMAP_JET);
-        cv::applyColorMap(roi_depth_colormap, roi_depth_colormap, cv::COLORMAP_JET);
-        cv::rectangle(depth_colormap, roi, cv::Scalar(0, 255, 0), 2);
-        cv::imshow("Depth Frame (ROI Highlighted)", depth_colormap);
-        cv::imshow("ROI Highlighted", roi_depth_colormap);
 
         // Generate and display the distance plot
         cv::Mat distance_plot = draw_plot(distance_history, "Distance (m)", cv::Scalar(0, 255, 0));
@@ -426,11 +337,75 @@ int main() try {
         cv::Mat velocity_plot = draw_plot(velocity_history, "Velocity (m/s)", cv::Scalar(255, 0, 0));
 
         // Show both plots
-        // cv::imshow("Runner Distance Plot", distance_plot);
-        // cv::imshow("Runner Velocity Plot", velocity_plot);
+        cv::imshow("Runner Distance Plot", distance_plot);
+        cv::imshow("Runner Velocity Plot", velocity_plot);
+
+        /* --------------------- ARDUINO COMMUNICATION ---------------------- */
+
+        // Value has changed, send update signal
+        // Convert to character '0' or '1'
+        char shouldDoorBeOpen = closest_point[1] < 0.2 ? '1' : '0';
+
+        // Send value
+        serialPort.write(&shouldDoorBeOpen, 1);
+
+        // Print to console
+        std::cout << "Sent: " << shouldDoorBeOpen << " | ";
 
 
-        if (cv::waitKey(1) == 27) break; // Press 'ESC' to exit
+
+
+
+        /* --------------- PLOTTING AND DEVELOPMENT OUTPUTTING -------------- */
+        // After the loop
+        std::cout << "Closest point: ["
+            << closest_point[0] << ", "
+            << closest_point[1] << ", "
+            << closest_point[2] << "] at distance: "
+            << closest_point[1] << " meters\n";
+
+        // Top-down
+        cv::Mat avg_z;
+        cv::divide(zmap, count_z, avg_z);
+        avg_z.setTo(0, count_z == 0);
+
+        double minZ, maxZ;
+        cv::minMaxLoc(avg_z, &minZ, &maxZ);
+        cv::Mat z8;
+        avg_z.convertTo(z8, CV_8U, 255.0 / (maxZ - minZ), -minZ * 255.0 / (maxZ - minZ));
+        cv::Mat heatmap;
+        cv::applyColorMap(z8, heatmap, cv::COLORMAP_JET);
+        cv::imshow("Top-Down Height Map (XY)", heatmap);
+
+        // Side view
+        cv::Mat avg_y;
+        cv::divide(xzmap, count_xz, avg_y);
+        avg_y.setTo(0, count_xz == 0);
+
+        double minY, maxY;
+        cv::minMaxLoc(avg_y, &minY, &maxY);
+        cv::Mat y8;
+        avg_y.convertTo(y8, CV_8U, 255.0 / (maxY - minY), -minY * 255.0 / (maxY - minY));
+        cv::Mat xzheat;
+        cv::applyColorMap(y8, xzheat, cv::COLORMAP_JET);
+        //cv::flip(xzheat, xzheat, 0); // 0 = flip vertically
+        cv::imshow("Front View (XZ Projection)", xzheat);
+
+
+        if (showCameraFeedROI) {
+            cv::Mat raw_frame(depth.get_height(), depth.get_width(), CV_16U, (void*)depth.get_data());
+            cv::Mat normalized;
+            raw_frame.convertTo(normalized, CV_8U, 255.0 / 10000.0);
+            cv::applyColorMap(normalized, normalized, cv::COLORMAP_JET);
+            cv::rectangle(
+                normalized,
+                cv::Point(ROI_LEFT, ROI_TOP),
+                cv::Point(ROI_RIGHT, ROI_BOTTOM),
+                cv::Scalar(0, 255, 255),
+                2
+            );
+            cv::imshow("Depth with ROI", normalized);
+        }
     }
 
     return 0;
