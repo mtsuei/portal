@@ -10,7 +10,6 @@
  * TODO:
  * - Implement I2C -> Pi
  * - Implement state switching
- * - 
  */
 
 // Arduino code to read a binary value from serial and set pin D2 accordingly
@@ -18,10 +17,10 @@ const int outputPin = 5;        // Using digital pin D5; temp light output
 const int resetPin = 6;         // Using digital pin D6 to reset the latch
 
 // Tower Solenoid Pins
-const int leftTowerOpen = 13;
-const int leftTowerClose = 12;
-const int rightTowerOpen = 11;
-const int rightTowerClose = 10;
+const int LClose = 13;
+const int RClose = 12;
+const int LOpen = 11;
+const int ROpen = 10;
 
 const int piCommsPin_close = 7; // Using digital pin D7 to listen for pi telling to close
 const int piCommsPin_start = 8; // Using digital pin D8 to listen for pi tellingn to start
@@ -40,10 +39,10 @@ void setup() {
   
   // Initialize pinModes
   pinMode(outputPin, OUTPUT);
-  pinMode(leftTowerOpen, OUTPUT);
-  pinMode(leftTowerClose, OUTPUT);
-  pinMode(rightTowerOpen, OUTPUT);
-  pinMode(rightTowerClose, OUTPUT);
+  pinMode(LOpen, OUTPUT);
+  pinMode(LClose, OUTPUT);
+  pinMode(ROpen, OUTPUT);
+  pinMode(RClose, OUTPUT);
   
   pinMode(resetPin, INPUT_PULLUP);
   pinMode(piCommsPin_close, INPUT_PULLUP);
@@ -51,10 +50,10 @@ void setup() {
   
   // Initialize pins
   digitalWrite(outputPin, LOW);
-  digitalWrite(leftTowerOpen, LOW);
-  digitalWrite(leftTowerClose, LOW);
-  digitalWrite(rightTowerOpen, LOW);
-  digitalWrite(rightTowerClose, LOW);
+  digitalWrite(LOpen, LOW);
+  digitalWrite(LClose, LOW);
+  digitalWrite(ROpen, LOW);
+  digitalWrite(RClose, LOW);
   
   // Initialize mode
   // Arduino assumes door is open on first connection
@@ -71,24 +70,30 @@ char lastByte;              // Holds most recent serial state
 
 void openDoor(){
   // Replace this with outputs to the solenoids
-  digitalWrite(leftTowerOpen, HIGH);
-  digitalWrite(rightTowerOpen, HIGH);
-  digitalWrite(outputPin, HIGH); 
+  digitalWrite(LOpen, HIGH);
+  digitalWrite(ROpen, HIGH);
+  //digitalWrite(outputPin, HIGH); 
 
   delay(1000);
-  digitalWrite(leftTowerOpen, LOW);
-  digitalWrite(rightTowerOpen, LOW);
+  digitalWrite(LOpen, LOW);
+  digitalWrite(ROpen, LOW);
+  //digitalWrite(outputPin, LOW); 
+  systemState = 2;
 }
 
 void closeDoor(){
   // Replace this with outputs to the solenoids
-  digitalWrite(leftTowerClose, HIGH);
-  digitalWrite(rightTowerClose, HIGH);
-  digitalWrite(outputPin, LOW); 
+  digitalWrite(LClose, HIGH);
+  digitalWrite(RClose, HIGH);
+  //digitalWrite(outputPin, HIGH); 
 
   delay(1000);
-  digitalWrite(leftTowerClose, LOW);
-  digitalWrite(rightTowerClose, LOW);  
+  digitalWrite(LClose, LOW);
+  digitalWrite(RClose, LOW);  
+  //digitalWrite(outputPin, LOW); 
+
+  // TODO: CHANGE THIS TO 0 ONCE ARMING SIGNAL IMPLEMENTED
+  systemState = 1;
 }
 
 void loop() {  
@@ -99,10 +104,8 @@ void loop() {
     lastByte = incomingByte;
     
     // Process the value
-    if (incomingByte == '1') {
+    if (incomingByte == '1' && systemState == 1) {
       // Solenoid trigger signal received
-      // TODO: CHECK THAT WE'RE IN ARMED STATE
-      // TODO: CHANGE STATE
       openDoor();
     } 
     else if (incomingByte == '0') {
@@ -114,8 +117,10 @@ void loop() {
   // Close door
   
   if (digitalRead(resetPin) == LOW){
-    // TODO: CHECK THAT WE'RE IN OPEN STATE
-    // TODO: CHANGE STATE
+    /*  I don't think we should check that we're in the open state
+     *  to close the door; it's possible that the door is really open
+     *  arduino thinks its closed. This will allow it to open anyways
+     */
     closeDoor(); 
   }
   

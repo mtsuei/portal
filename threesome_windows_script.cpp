@@ -188,8 +188,10 @@ const int PLOT_WIDTH = 600;
 const int PLOT_HEIGHT = 300;
 const int MAX_POINTS = 100; // Number of points to keep in plot
 
+const int REGRESSION_WINDOW = 20; // Number of past timesteps to consider
 std::vector<float> distance_history; // Stores past distances
 std::vector<float> velocity_history; // Stores velocity estimates
+std::vector<float> time_history;
 std::chrono::steady_clock::time_point last_time; // Stores the last timestamp
 
 // Function to convert depth frame to OpenCV Mat (16-bit grayscale)
@@ -309,42 +311,69 @@ int main() try {
         }
 
         /* --------------------- PROCESS POSITION DATA --------------------- */
-        // Get current time
-        auto now = std::chrono::steady_clock::now();
-        std::chrono::duration<float> elapsed_time = now - last_time;
-        last_time = now; // Update last timestamp
 
-        // Compute velocity (change in distance / time)
-        float velocity_m_s = 0.0;
-        if (!distance_history.empty()) {
-            float last_distance = distance_history.back();
-            velocity_m_s = (closest_point[1] - last_distance) / elapsed_time.count();
+        // Check that closest point found; otherwise calcs freeze system
+        float velocity_lr = 0.0f;
+        if (closest_point[1] != std::numeric_limits<float>::max()) {
+            // Get current time
+            auto now = std::chrono::steady_clock::now();
+            std::chrono::duration<float> elapsed_time = now - last_time;
+            last_time = now;
+
+            // Track cumulative time for regression
+            float total_time = time_history.empty() ? 0.0f : time_history.back() + elapsed_time.count();
+            time_history.push_back(total_time);
+            if (time_history.size() > MAX_POINTS) time_history.erase(time_history.begin());
+
+            // Store current distance
+            float current_distance = closest_point[1];
+            distance_history.push_back(current_distance);
+            if (distance_history.size() > MAX_POINTS) distance_history.erase(distance_history.begin());
+
+            // Estimate velocity using linear regression on the last N points
+            int n = std::min(REGRESSION_WINDOW, (int)distance_history.size());
+            if (n >= 2) {
+                float sum_t = 0.0f, sum_d = 0.0f, sum_tt = 0.0f, sum_td = 0.0f;
+                for (int i = time_history.size() - n; i < time_history.size(); ++i) {
+                    float t = time_history[i];
+                    float d = distance_history[i];
+                    sum_t += t;
+                    sum_d += d;
+                    sum_tt += t * t;
+                    sum_td += t * d;
+                }
+                float denom = n * sum_tt - sum_t * sum_t;
+                if (denom != 0.0f) {
+                    float slope = (n * sum_td - sum_t * sum_d) / denom;
+                    velocity_lr = slope; // m/s
+                }
+            }
+
+            if (velocity_lr < 0) {
+                std::cout << -closest_point[0] / velocity_lr;
+            }
+
+            // Use regression velocity
+            velocity_history.push_back(velocity_lr);
+            if (velocity_history.size() > MAX_POINTS) velocity_history.erase(velocity_history.begin());
+
+            // Plotting
+            cv::Mat distance_plot = draw_plot(distance_history, "Distance (m)", cv::Scalar(0, 255, 0));
+            cv::Mat velocity_plot = draw_plot(velocity_history, "Velocity (m/s)", cv::Scalar(255, 0, 0));
+
+            cv::imshow("Runner Distance Plot", distance_plot);
+            cv::imshow("Runner Velocity Plot", velocity_plot);
         }
-
-        // Update velocity moving average
-        /*velocity_ma.next(velocity_m_s);*/
-
-        // Store values for plotting
-        distance_history.push_back(closest_point[1]);
-        velocity_history.push_back(velocity_m_s);
-        if (distance_history.size() > MAX_POINTS) distance_history.erase(distance_history.begin());
-        if (velocity_history.size() > MAX_POINTS) velocity_history.erase(velocity_history.begin());
-
-        // Generate and display the distance plot
-        cv::Mat distance_plot = draw_plot(distance_history, "Distance (m)", cv::Scalar(0, 255, 0));
-
-        // Generate and display the velocity plot
-        cv::Mat velocity_plot = draw_plot(velocity_history, "Velocity (m/s)", cv::Scalar(255, 0, 0));
-
-        // Show both plots
-        cv::imshow("Runner Distance Plot", distance_plot);
-        cv::imshow("Runner Velocity Plot", velocity_plot);
 
         /* --------------------- ARDUINO COMMUNICATION ---------------------- */
 
         // Value has changed, send update signal
         // Convert to character '0' or '1'
-        char shouldDoorBeOpen = closest_point[1] < 0.2 ? '1' : '0';
+        char shouldDoorBeOpen = '0';
+        if (velocity_lr < 0) {
+            shouldDoorBeOpen = -closest_point[0] / velocity_lr < 0.4 ? '1' : '0';
+        }
+        //char shouldDoorBeOpen = closest_point[1] < 1 ? '1' : '0';
 
         // Send value
         serialPort.write(&shouldDoorBeOpen, 1);
