@@ -172,7 +172,7 @@ public:
 // END MOVING AVERAGE CLASS
 
 // Define region of interest (ROI) to ignore floor
-const int ROI_TOP = 50;     // Ignore pixels above this line
+const int ROI_TOP = 0;     // Ignore pixels above this line
 const int ROI_BOTTOM = 350;  // Ignore the floor
 const int ROI_LEFT = 120;    // Focus on the central region
 const int ROI_RIGHT = 520;   // Ignore far-left and far-right objects
@@ -188,7 +188,7 @@ const int PLOT_WIDTH = 600;
 const int PLOT_HEIGHT = 300;
 const int MAX_POINTS = 100; // Number of points to keep in plot
 
-const int REGRESSION_WINDOW = 20; // Number of past timesteps to consider
+const int REGRESSION_WINDOW = 7; // Number of past timesteps to consider
 std::vector<float> distance_history; // Stores past distances
 std::vector<float> velocity_history; // Stores velocity estimates
 std::vector<float> time_history;
@@ -227,7 +227,7 @@ cv::Mat draw_plot(const std::vector<float>& data, const std::string& label, cv::
 }
 
 const float cameraHeight = 2.413f;   // meters
-const float cameraDecAngle = 17.0f; // degrees
+const float cameraDecAngle = 13.0f; // degrees
 
 const float resolution = 0.01f; // 1cm per pixel
 const int map_size = 500;       // 5m x 5m map
@@ -244,6 +244,8 @@ int main() try {
     std::cout << "Sending binary values over serial. Press Ctrl+C to exit." << std::endl;
 
     rs2::pipeline pipe;
+    rs2::config cfg;
+    //cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 90);
     pipe.start();
 
     float theta = cameraDecAngle * M_PI / 180.0f;
@@ -287,7 +289,7 @@ int main() try {
                 float Zw = -p_cam[1] * sinT - p_cam[2] * cosT + cameraHeight;
 
                 // Track closest point
-                if (Yw < closest_point[1] && Zw > 0.6) {
+                if (Yw < closest_point[1] && Zw > 1) {
                     closest_point[0] = Xw;
                     closest_point[1] = Yw;
                     closest_point[2] = Zw;
@@ -331,10 +333,9 @@ int main() try {
             if (distance_history.size() > MAX_POINTS) distance_history.erase(distance_history.begin());
 
             // Estimate velocity using linear regression on the last N points
-            int n = std::min(REGRESSION_WINDOW, (int)distance_history.size());
-            if (n >= 2) {
+            if (distance_history.size() >= REGRESSION_WINDOW) {
                 float sum_t = 0.0f, sum_d = 0.0f, sum_tt = 0.0f, sum_td = 0.0f;
-                for (int i = time_history.size() - n; i < time_history.size(); ++i) {
+                for (int i = time_history.size() - REGRESSION_WINDOW; i < time_history.size(); ++i) {
                     float t = time_history[i];
                     float d = distance_history[i];
                     sum_t += t;
@@ -342,15 +343,15 @@ int main() try {
                     sum_tt += t * t;
                     sum_td += t * d;
                 }
-                float denom = n * sum_tt - sum_t * sum_t;
+                float denom = REGRESSION_WINDOW * sum_tt - sum_t * sum_t;
                 if (denom != 0.0f) {
-                    float slope = (n * sum_td - sum_t * sum_d) / denom;
+                    float slope = (REGRESSION_WINDOW * sum_td - sum_t * sum_d) / denom;
                     velocity_lr = slope; // m/s
                 }
             }
 
             if (velocity_lr < 0) {
-                std::cout << -closest_point[0] / velocity_lr;
+                std::cout << " | velocity: " << velocity_lr;
             }
 
             // Use regression velocity
@@ -364,26 +365,65 @@ int main() try {
             cv::imshow("Runner Distance Plot", distance_plot);
             cv::imshow("Runner Velocity Plot", velocity_plot);
         }
+        else {
+            // currently not sensing a point; reset data history
+            distance_history.clear();
+            velocity_history.clear();
+            time_history.clear();
+        }
 
         /* --------------------- ARDUINO COMMUNICATION ---------------------- */
 
         // Value has changed, send update signal
         // Convert to character '0' or '1'
+
         char shouldDoorBeOpen = '0';
         if (velocity_lr < 0) {
-            shouldDoorBeOpen = -closest_point[0] / velocity_lr < 0.4 ? '1' : '0';
+            // Make sure door is in negative position
+
+            //shouldDoorBeOpen = -closest_point[0] / velocity_lr < 2.2 ? '1' : '0';
+
+            //std::cout << "Stopped at velocity " << -velocity_lr << " at a distance" << closest_point[0];
+            // Pause program
+
+
+            if (velocity_lr > -1) {
+                shouldDoorBeOpen = closest_point[1] < 0.4 ? '1' : '0';
+                std::cout << " | Zone 1";
+            }
+            else {
+                shouldDoorBeOpen = -closest_point[0] / velocity_lr < 1.5 ? '1' : '0';
+                std::cout << " | Zone 2";
+
+            }
+
+
+            /*else if (velocity_lr > -1.7) {
+                shouldDoorBeOpen = closest_point[1] < 1 ? '1' : '0';
+                std::cout << " | Zone 2";
+            }
+            else {
+                shouldDoorBeOpen = closest_point[1] < 3 ? '1' : '0';
+                std::cout << " | Zone 3";
+
+            }*/
+
+            std::cout << " | " << closest_point[1] << " m away";
+
+
+
         }
-        //char shouldDoorBeOpen = closest_point[1] < 1 ? '1' : '0';
+        // char shouldDoorBeOpen = closest_point[1] < 0.2 ? '1' : '0';
 
         // Send value
         serialPort.write(&shouldDoorBeOpen, 1);
 
+        if (shouldDoorBeOpen == '1') {
+            //std::cin.get();
+        }
+
         // Print to console
         std::cout << "Sent: " << shouldDoorBeOpen << " | ";
-
-
-
-
 
         /* --------------- PLOTTING AND DEVELOPMENT OUTPUTTING -------------- */
         // After the loop
@@ -394,31 +434,31 @@ int main() try {
             << closest_point[1] << " meters\n";
 
         // Top-down
-        cv::Mat avg_z;
-        cv::divide(zmap, count_z, avg_z);
-        avg_z.setTo(0, count_z == 0);
+        //cv::Mat avg_z;
+        //cv::divide(zmap, count_z, avg_z);
+        //avg_z.setTo(0, count_z == 0);
 
-        double minZ, maxZ;
-        cv::minMaxLoc(avg_z, &minZ, &maxZ);
-        cv::Mat z8;
-        avg_z.convertTo(z8, CV_8U, 255.0 / (maxZ - minZ), -minZ * 255.0 / (maxZ - minZ));
-        cv::Mat heatmap;
-        cv::applyColorMap(z8, heatmap, cv::COLORMAP_JET);
-        cv::imshow("Top-Down Height Map (XY)", heatmap);
+        //double minZ, maxZ;
+        //cv::minMaxLoc(avg_z, &minZ, &maxZ);
+        //cv::Mat z8;
+        //avg_z.convertTo(z8, CV_8U, 255.0 / (maxZ - minZ), -minZ * 255.0 / (maxZ - minZ));
+        //cv::Mat heatmap;
+        //cv::applyColorMap(z8, heatmap, cv::COLORMAP_JET);
+        //cv::imshow("Top-Down Height Map (XY)", heatmap);
 
         // Side view
-        cv::Mat avg_y;
-        cv::divide(xzmap, count_xz, avg_y);
-        avg_y.setTo(0, count_xz == 0);
+        //cv::Mat avg_y;
+        //cv::divide(xzmap, count_xz, avg_y);
+        //avg_y.setTo(0, count_xz == 0);
 
-        double minY, maxY;
-        cv::minMaxLoc(avg_y, &minY, &maxY);
-        cv::Mat y8;
-        avg_y.convertTo(y8, CV_8U, 255.0 / (maxY - minY), -minY * 255.0 / (maxY - minY));
-        cv::Mat xzheat;
-        cv::applyColorMap(y8, xzheat, cv::COLORMAP_JET);
-        //cv::flip(xzheat, xzheat, 0); // 0 = flip vertically
-        cv::imshow("Front View (XZ Projection)", xzheat);
+        //double minY, maxY;
+        //cv::minMaxLoc(avg_y, &minY, &maxY);
+        //cv::Mat y8;
+        //avg_y.convertTo(y8, CV_8U, 255.0 / (maxY - minY), -minY * 255.0 / (maxY - minY));
+        //cv::Mat xzheat;
+        //cv::applyColorMap(y8, xzheat, cv::COLORMAP_JET);
+        ////cv::flip(xzheat, xzheat, 0); // 0 = flip vertically
+        //cv::imshow("Front View (XZ Projection)", xzheat);
 
 
         if (showCameraFeedROI) {
@@ -434,6 +474,11 @@ int main() try {
                 2
             );
             cv::imshow("Depth with ROI", normalized);
+        }
+
+        // Calculate sensor frequency
+        if (time_history.size() >= 2) {
+            std::cout << " | refresh rate: " << time_history.size() / (time_history[time_history.size() - 1] - time_history[0]) << " hz | ";
         }
     }
 

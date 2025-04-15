@@ -15,6 +15,7 @@
 // Arduino code to read a binary value from serial and set pin D2 accordingly
 const int outputPin = 5;        // Using digital pin D5; temp light output
 const int resetPin = 6;         // Using digital pin D6 to reset the latch
+const int ledPin = A0;
 
 // Tower Solenoid Pins
 const int LClose = 13;
@@ -22,14 +23,16 @@ const int RClose = 12;
 const int LOpen = 11;
 const int ROpen = 10;
 
-const int piCommsPin_close = 7; // Using digital pin D7 to listen for pi telling to close
-const int piCommsPin_start = 8; // Using digital pin D8 to listen for pi tellingn to start
+// Pi comms pins (i.e. get info from comms)
+const int piCommsPin_open = 7;
+const int piCommsPin_close = 8;
+const int piCommsPin_arm = 9;
 
 /*  
  * `systemState` keeps track of where in the cycle we are
- *    0 - door closed, not live
- *    1 - door closed, live (i.e. sensing, possible open)
- *    2 - door open, not live
+ *    0 - door closed, not armed
+ *    1 - door closed, armed (i.e. sensing, possible open)
+ *    2 - door open, not armed
  */
 int systemState;
 
@@ -45,8 +48,11 @@ void setup() {
   pinMode(RClose, OUTPUT);
   
   pinMode(resetPin, INPUT_PULLUP);
-  pinMode(piCommsPin_close, INPUT_PULLUP);
-  pinMode(piCommsPin_start, INPUT_PULLUP);
+  pinMode(piCommsPin_open, INPUT);
+  pinMode(piCommsPin_close, INPUT);
+  pinMode(piCommsPin_arm, INPUT);
+
+  pinMode(ledPin, OUTPUT);
   
   // Initialize pins
   digitalWrite(outputPin, LOW);
@@ -72,58 +78,63 @@ void openDoor(){
   // Replace this with outputs to the solenoids
   digitalWrite(LOpen, HIGH);
   digitalWrite(ROpen, HIGH);
-  //digitalWrite(outputPin, HIGH); 
-
   delay(1000);
   digitalWrite(LOpen, LOW);
   digitalWrite(ROpen, LOW);
-  //digitalWrite(outputPin, LOW); 
-  systemState = 2;
 }
 
 void closeDoor(){
   // Replace this with outputs to the solenoids
   digitalWrite(LClose, HIGH);
   digitalWrite(RClose, HIGH);
-  //digitalWrite(outputPin, HIGH); 
-
   delay(1000);
   digitalWrite(LClose, LOW);
   digitalWrite(RClose, LOW);  
-  //digitalWrite(outputPin, LOW); 
-
-  // TODO: CHANGE THIS TO 0 ONCE ARMING SIGNAL IMPLEMENTED
-  systemState = 1;
 }
 
 void loop() {  
+  char incomingByte;
   // Check if data is available to read
   if (Serial.available() > 0) {
     // Read the incoming byte
-    char incomingByte = Serial.read();
-    lastByte = incomingByte;
-    
-    // Process the value
-    if (incomingByte == '1' && systemState == 1) {
-      // Solenoid trigger signal received
-      openDoor();
-    } 
-    else if (incomingByte == '0') {
-      // Do nothing for now
-    }
-    // Ignore any other characters
+    incomingByte = Serial.read();
+    // Right now should be '0' or '1'
+    //lastByte = incomingByte;
   }
 
-  // Close door
+  // Act based on system state
+  if (systemState == 0){ // Door closed, not armed --------------------
+    analogWrite(ledPin, 0);
+  } else if (systemState == 1){ // Door closed, armed -----------------
+    // Door closed, armed
+    analogWrite(ledPin, 255);
+    if (incomingByte == '1') { 
+      // Solenoid trigger signal received
+      openDoor();
+      systemState = 2;
+    } 
+  } else if (systemState == 2){ // Door open --------------------------
+    // Do nothing for now 
+    analogWrite(ledPin, 0);
+  }
   
-  if (digitalRead(resetPin) == LOW){
+  if (digitalRead(piCommsPin_close) == HIGH or digitalRead(resetPin) == LOW){
     /*  I don't think we should check that we're in the open state
      *  to close the door; it's possible that the door is really open
      *  arduino thinks its closed. This will allow it to open anyways
      */
     closeDoor(); 
+    systemState = 0;
   }
-  
+
+  if (digitalRead(piCommsPin_open) == HIGH ){
+    openDoor();
+    systemState = 2;
+  }
+
+  if (digitalRead(piCommsPin_arm) == HIGH){
+      systemState = 1;  
+  }
   
   // Small delay to avoid overwhelming the serial buffer
   delay(50);
